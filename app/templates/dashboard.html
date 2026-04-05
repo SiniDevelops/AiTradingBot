@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot Dashboard</title>
+    <meta name="description" content="Real-time trading signal dashboard with news analysis and rule-based engine execution monitoring">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        /* ═══════════════ CSS Reset & Variables ═══════════════ */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-card: rgba(255, 255, 255, 0.03);
+            --bg-card-hover: rgba(255, 255, 255, 0.06);
+            --border: rgba(255, 255, 255, 0.06);
+            --border-glow: rgba(255, 255, 255, 0.12);
+
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+
+            --buy: #00e676;
+            --buy-bg: rgba(0, 230, 118, 0.08);
+            --buy-border: rgba(0, 230, 118, 0.25);
+            --sell: #ff1744;
+            --sell-bg: rgba(255, 23, 68, 0.08);
+            --sell-border: rgba(255, 23, 68, 0.25);
+            --hold: #78909c;
+            --hold-bg: rgba(120, 144, 156, 0.08);
+            --hold-border: rgba(120, 144, 156, 0.25);
+
+            --accent: #6366f1;
+            --accent-glow: rgba(99, 102, 241, 0.3);
+            --warning: #f59e0b;
+            --info: #38bdf8;
+
+            --radius: 12px;
+            --radius-sm: 8px;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            --mono: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
+        body {
+            font-family: var(--font);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Background glow effects */
+        body::before {
+            content: '';
+            position: fixed;
+            top: -200px;
+            left: -200px;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+            opacity: 0.3;
+        }
+
+        /* ═══════════════ Header ═══════════════ */
+        .header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(10, 14, 23, 0.85);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+            padding: 0 32px;
+            height: 64px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            font-size: 20px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #6366f1, #a78bfa, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.5px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--buy);
+            box-shadow: 0 0 8px var(--buy);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .status-dot.disconnected {
+            background: var(--sell);
+            box-shadow: 0 0 8px var(--sell);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .status-text {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .signal-counters {
+            display: flex;
+            gap: 12px;
+        }
+
+        .counter-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            font-family: var(--mono);
+        }
+
+        .counter-badge.buy { background: var(--buy-bg); color: var(--buy); border: 1px solid var(--buy-border); }
+        .counter-badge.sell { background: var(--sell-bg); color: var(--sell); border: 1px solid var(--sell-border); }
+        .counter-badge.hold { background: var(--hold-bg); color: var(--hold); border: 1px solid var(--hold-border); }
+
+        .clock {
+            font-size: 13px;
+            font-family: var(--mono);
+            color: var(--text-muted);
+        }
+
+        /* ═══════════════ Main Layout ═══════════════ */
+        .main {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 24px;
+            padding: 24px 32px;
+            max-width: 1600px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        @media (max-width: 1200px) {
+            .main { grid-template-columns: 1fr; }
+        }
+
+        /* ═══════════════ Card Base ═══════════════ */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            transition: border-color 0.3s ease;
+        }
+
+        .card:hover { border-color: var(--border-glow); }
+
+        .card-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .card-title {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card-title .icon { font-size: 16px; }
+
+        .card-body { padding: 0; }
+
+        /* ═══════════════ Signals Table ═══════════════ */
+        .signals-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .signals-table thead th {
+            padding: 10px 16px;
+            text-align: left;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            background: rgba(255,255,255,0.02);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+        }
+
+        .signals-table tbody tr {
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        .signals-table tbody tr:hover { background: var(--bg-card-hover); }
+
+        .signals-table td {
+            padding: 12px 16px;
+            font-size: 13px;
+            vertical-align: middle;
+        }
+
+        .signal-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            font-family: var(--mono);
+            letter-spacing: 0.5px;
+        }
+
+        .signal-badge.BUY { background: var(--buy-bg); color: var(--buy); border: 1px solid var(--buy-border); }
+        .signal-badge.SELL { background: var(--sell-bg); color: var(--sell); border: 1px solid var(--sell-border); }
+        .signal-badge.HOLD { background: var(--hold-bg); color: var(--hold); border: 1px solid var(--hold-border); }
+
+        .ticker-label {
+            font-weight: 700;
+            font-family: var(--mono);
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+
+        .strength-bar-container {
+            width: 80px;
+            height: 6px;
+            background: rgba(255,255,255,0.06);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .strength-bar {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.4s ease;
+        }
+
+        .strength-bar.BUY { background: linear-gradient(90deg, #00c853, #00e676); }
+        .strength-bar.SELL { background: linear-gradient(90deg, #d50000, #ff1744); }
+        .strength-bar.HOLD { background: linear-gradient(90deg, #546e7a, #78909c); }
+
+        .impact-chip {
+            font-family: var(--mono);
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .impact-positive { color: var(--buy); }
+        .impact-negative { color: var(--sell); }
+        .impact-neutral { color: var(--hold); }
+
+        .time-ago {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        /* Signal detail row (expanded) */
+        .signal-detail-row td {
+            padding: 0 !important;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .signal-details {
+            padding: 12px 20px 16px;
+            background: rgba(99, 102, 241, 0.03);
+            display: none;
+        }
+
+        .signal-details.show { display: block; }
+
+        .signal-details h4 {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .reason-item {
+            font-size: 12px;
+            color: var(--text-secondary);
+            padding: 4px 0;
+            padding-left: 16px;
+            position: relative;
+            line-height: 1.5;
+        }
+
+        .reason-item::before {
+            content: '\2192';
+            position: absolute;
+            left: 0;
+            color: var(--accent);
+        }
+
+        .news-impact-text {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 8px;
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.03);
+            border-radius: var(--radius-sm);
+            border-left: 3px solid var(--accent);
+        }
+
+        /* ═══════════════ News Feed ═══════════════ */
+        .news-list { max-height: 500px; overflow-y: auto; }
+
+        .news-item {
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.2s ease;
+        }
+
+        .news-item:hover { background: var(--bg-card-hover); }
+
+        .news-item-title {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-primary);
+            margin-bottom: 6px;
+            line-height: 1.4;
+        }
+
+        .news-meta {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .news-source {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .ticker-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            font-family: var(--mono);
+            background: rgba(99, 102, 241, 0.12);
+            color: var(--accent);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+        }
+
+        .news-time {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* ═══════════════ Right Column ═══════════════ */
+        .right-column {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        /* Stats Row */
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
+            text-align: center;
+            transition: border-color 0.3s ease, transform 0.2s ease;
+        }
+
+        .stat-card:hover {
+            border-color: var(--border-glow);
+            transform: translateY(-2px);
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 800;
+            font-family: var(--mono);
+            line-height: 1;
+            margin-bottom: 4px;
+        }
+
+        .stat-value.buy-color { color: var(--buy); }
+        .stat-value.sell-color { color: var(--sell); }
+        .stat-value.hold-color { color: var(--hold); }
+
+        .stat-label {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        /* State Cards */
+        .state-card {
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .state-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .state-ticker {
+            font-size: 16px;
+            font-weight: 700;
+            font-family: var(--mono);
+        }
+
+        .open-events-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 600;
+            background: rgba(245, 158, 11, 0.12);
+            color: var(--warning);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+
+        .state-risks {
+            list-style: none;
+        }
+
+        .state-risk-item {
+            font-size: 12px;
+            color: var(--text-secondary);
+            padding: 3px 0;
+            padding-left: 14px;
+            position: relative;
+        }
+
+        .state-risk-item::before {
+            content: '\26A0';
+            position: absolute;
+            left: 0;
+            font-size: 10px;
+        }
+
+        .state-risk-item.high::before { color: var(--sell); }
+        .state-risk-item.med::before { color: var(--warning); }
+
+        /* Analysis Cards */
+        .analysis-item {
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .analysis-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+
+        .analysis-event-type {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: rgba(56, 189, 248, 0.1);
+            color: var(--info);
+            border: 1px solid rgba(56, 189, 248, 0.2);
+        }
+
+        .analysis-summary {
+            font-size: 12px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        .analysis-metrics {
+            display: flex;
+            gap: 16px;
+            margin-top: 8px;
+        }
+
+        .metric {
+            font-size: 11px;
+            font-family: var(--mono);
+            color: var(--text-muted);
+        }
+
+        .metric-value {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        /* ═══════════════ Empty State ═══════════════ */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+        }
+
+        .empty-state .icon { font-size: 32px; margin-bottom: 12px; opacity: 0.4; }
+        .empty-state p { font-size: 13px; }
+        .empty-state .hint { font-size: 11px; margin-top: 6px; opacity: 0.6; }
+
+        /* ═══════════════ Scrollbar ═══════════════ */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.1);
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+        /* ═══════════════ Animations ═══════════════ */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+
+        /* Smooth transitions for counters */
+        .counter-transition {
+            transition: transform 0.2s ease;
+        }
+
+        .counter-transition.bump {
+            transform: scale(1.15);
+        }
+    </style>
+</head>
+<body>
+
+<!-- ═══════════════ Header ═══════════════ -->
+<header class="header" id="header">
+    <div class="header-left">
+        <span class="logo">Trading Bot</span>
+        <div class="status-dot" id="statusDot"></div>
+        <span class="status-text" id="statusText">Connecting...</span>
+    </div>
+    <div class="header-right">
+        <div class="signal-counters">
+            <div class="counter-badge buy">
+                <span>BUY</span>
+                <span class="counter-transition" id="buyCount">0</span>
+            </div>
+            <div class="counter-badge sell">
+                <span>SELL</span>
+                <span class="counter-transition" id="sellCount">0</span>
+            </div>
+            <div class="counter-badge hold">
+                <span>HOLD</span>
+                <span class="counter-transition" id="holdCount">0</span>
+            </div>
+        </div>
+        <span class="clock" id="clock">--:--:--</span>
+    </div>
+</header>
+
+<!-- ═══════════════ Main Content ═══════════════ -->
+<main class="main">
+
+    <!-- Left Column -->
+    <div class="left-column">
+
+        <!-- Signal Engine Panel -->
+        <div class="card" id="signalsCard">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">&#9889;</span>
+                    Signal Engine Executions
+                </div>
+                <span class="time-ago" id="lastUpdate">Waiting for data...</span>
+            </div>
+            <div class="card-body">
+                <table class="signals-table" id="signalsTable">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Ticker</th>
+                            <th>Signal</th>
+                            <th>Strength</th>
+                            <th>Event</th>
+                            <th>Impact</th>
+                            <th>Confidence</th>
+                        </tr>
+                    </thead>
+                    <tbody id="signalsBody">
+                        <tr><td colspan="7">
+                            <div class="empty-state">
+                                <div class="icon">&#9889;</div>
+                                <p>No signals yet</p>
+                                <p class="hint">Send news data to generate trading signals</p>
+                            </div>
+                        </td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- News Analysis Panel -->
+        <div class="card" id="newsCard">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">&#128240;</span>
+                    News Feed
+                </div>
+                <span class="time-ago" id="newsCount">0 articles</span>
+            </div>
+            <div class="card-body">
+                <div class="news-list" id="newsList">
+                    <div class="empty-state">
+                        <div class="icon">&#128240;</div>
+                        <p>No news ingested yet</p>
+                        <p class="hint">Use the /ingest_news endpoint or the fake data sender</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Right Column -->
+    <div class="right-column">
+
+        <!-- Stats Summary -->
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="stat-value buy-color" id="totalBuy">0</div>
+                <div class="stat-label">Total Buy</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value sell-color" id="totalSell">0</div>
+                <div class="stat-label">Total Sell</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value hold-color" id="totalHold">0</div>
+                <div class="stat-label">Total Hold</div>
+            </div>
+        </div>
+
+        <!-- Ticker States -->
+        <div class="card" id="statesCard">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">&#128202;</span>
+                    Ticker States
+                </div>
+            </div>
+            <div class="card-body" id="statesBody">
+                <div class="empty-state">
+                    <div class="icon">&#128202;</div>
+                    <p>No ticker states</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Analyses -->
+        <div class="card" id="analysesCard">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">&#129504;</span>
+                    LLM Analyses
+                </div>
+            </div>
+            <div class="card-body" id="analysesBody" style="max-height: 400px; overflow-y: auto;">
+                <div class="empty-state">
+                    <div class="icon">&#129504;</div>
+                    <p>No analyses yet</p>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+</main>
+
+<!-- ═══════════════ JavaScript ═══════════════ -->
+<script>
+(function() {
+    'use strict';
+
+    const API_BASE = '';  // Same origin
+    const POLL_INTERVAL = 10000;  // 10 seconds
+    let lastDataHash = '';
+
+    // ── DOM References ──
+    const $ = id => document.getElementById(id);
+
+    // ── Time Formatting ──
+    function timeAgo(timestamp) {
+        if (!timestamp) return '';
+        const now = new Date();
+        const then = new Date(timestamp);
+        const diff = Math.floor((now - then) / 1000);
+        if (diff < 5) return 'just now';
+        if (diff < 60) return diff + 's ago';
+        if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+        if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+        return Math.floor(diff / 86400) + 'd ago';
+    }
+
+    function formatTime(timestamp) {
+        if (!timestamp) return '--:--';
+        const d = new Date(timestamp);
+        return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    }
+
+    // ── Clock ──
+    function updateClock() {
+        $('clock').textContent = new Date().toLocaleTimeString('en-US', {
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        });
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // ── Render Signals ──
+    function renderSignals(signals) {
+        const tbody = $('signalsBody');
+
+        if (!signals || signals.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="7">
+                <div class="empty-state">
+                    <div class="icon">&#9889;</div>
+                    <p>No signals yet</p>
+                    <p class="hint">Send news data to generate trading signals</p>
+                </div>
+            </td></tr>`;
+            return;
+        }
+
+        // Count signals
+        let buyCount = 0, sellCount = 0, holdCount = 0;
+        signals.forEach(s => {
+            if (s.signal === 'BUY') buyCount++;
+            else if (s.signal === 'SELL') sellCount++;
+            else holdCount++;
+        });
+
+        // Update counters
+        updateCounter('buyCount', buyCount);
+        updateCounter('sellCount', sellCount);
+        updateCounter('holdCount', holdCount);
+        $('totalBuy').textContent = buyCount;
+        $('totalSell').textContent = sellCount;
+        $('totalHold').textContent = holdCount;
+
+        let html = '';
+        signals.forEach((s, idx) => {
+            const impactClass = s.impact_score > 0.1 ? 'impact-positive' :
+                                s.impact_score < -0.1 ? 'impact-negative' : 'impact-neutral';
+            const strengthPct = Math.round(s.strength * 100);
+
+            html += `
+                <tr onclick="toggleDetails(${idx})" class="fade-in">
+                    <td class="time-ago">${formatTime(s.created_at)}</td>
+                    <td><span class="ticker-label">${s.ticker}</span></td>
+                    <td><span class="signal-badge ${s.signal}">${s.signal}</span></td>
+                    <td>
+                        <div class="strength-bar-container">
+                            <div class="strength-bar ${s.signal}" style="width:${strengthPct}%"></div>
+                        </div>
+                        <span style="font-size:11px;color:var(--text-muted);margin-left:6px;font-family:var(--mono)">${strengthPct}%</span>
+                    </td>
+                    <td style="font-size:12px;color:var(--text-secondary)">${(s.event_type || '').replace('_', ' ')}</td>
+                    <td><span class="impact-chip ${impactClass}">${s.impact_score >= 0 ? '+' : ''}${s.impact_score.toFixed(2)}</span></td>
+                    <td style="font-family:var(--mono);font-size:12px;color:var(--text-secondary)">${(s.confidence * 100).toFixed(0)}%</td>
+                </tr>
+                <tr class="signal-detail-row">
+                    <td colspan="7">
+                        <div class="signal-details" id="detail-${idx}">
+                            <h4>Signal Reasoning</h4>
+                            ${(s.reasons || []).map(r => `<div class="reason-item">${escapeHtml(r)}</div>`).join('')}
+                            <div class="news-impact-text">${escapeHtml(s.news_impact_summary || '')}</div>
+                        </div>
+                    </td>
+                </tr>`;
+        });
+
+        tbody.innerHTML = html;
+    }
+
+    // ── Render News ──
+    function renderNews(news) {
+        const container = $('newsList');
+        $('newsCount').textContent = news.length + ' articles';
+
+        if (!news || news.length === 0) {
+            container.innerHTML = `<div class="empty-state">
+                <div class="icon">&#128240;</div>
+                <p>No news ingested yet</p>
+                <p class="hint">Use the /ingest_news endpoint or the fake data sender</p>
+            </div>`;
+            return;
+        }
+
+        let html = '';
+        news.forEach(n => {
+            const tickers = (n.tickers || []).map(t =>
+                `<span class="ticker-pill">${t}</span>`
+            ).join(' ');
+
+            html += `
+                <div class="news-item fade-in">
+                    <div class="news-item-title">${escapeHtml(n.title || '')}</div>
+                    <div class="news-meta">
+                        <span class="news-source">${escapeHtml(n.source || '')}</span>
+                        ${tickers}
+                        <span class="news-time">${timeAgo(n.published_at)}</span>
+                    </div>
+                </div>`;
+        });
+
+        container.innerHTML = html;
+    }
+
+    // ── Render States ──
+    function renderStates(states) {
+        const container = $('statesBody');
+
+        const tickers = Object.keys(states);
+        if (tickers.length === 0) {
+            container.innerHTML = `<div class="empty-state">
+                <div class="icon">&#128202;</div>
+                <p>No ticker states</p>
+            </div>`;
+            return;
+        }
+
+        let html = '';
+        tickers.sort().forEach(ticker => {
+            const state = states[ticker];
+            const openCount = (state.open_events || []).length;
+            const risks = state.key_risks || [];
+
+            html += `
+                <div class="state-card fade-in">
+                    <div class="state-card-header">
+                        <span class="state-ticker">${ticker}</span>
+                        <span class="open-events-badge">${openCount} open</span>
+                    </div>
+                    <ul class="state-risks">
+                        ${risks.length > 0 ? risks.slice(0, 3).map(r => {
+                            const severity = r.includes('[HIGH]') ? 'high' : r.includes('[MED]') ? 'med' : '';
+                            return `<li class="state-risk-item ${severity}">${escapeHtml(r.substring(0, 80))}</li>`;
+                        }).join('') : '<li style="font-size:12px;color:var(--text-muted);list-style:none">No active risks</li>'}
+                    </ul>
+                </div>`;
+        });
+
+        container.innerHTML = html;
+    }
+
+    // ── Render Analyses ──
+    function renderAnalyses(analyses) {
+        const container = $('analysesBody');
+
+        if (!analyses || analyses.length === 0) {
+            container.innerHTML = `<div class="empty-state">
+                <div class="icon">&#129504;</div>
+                <p>No analyses yet</p>
+            </div>`;
+            return;
+        }
+
+        let html = '';
+        analyses.slice(0, 15).forEach(a => {
+            const output = a.llm_output || {};
+            const impactClass = (output.impact_score || 0) > 0.1 ? 'impact-positive' :
+                                (output.impact_score || 0) < -0.1 ? 'impact-negative' : 'impact-neutral';
+
+            html += `
+                <div class="analysis-item fade-in">
+                    <div class="analysis-header">
+                        <span class="ticker-label">${(a.tickers || [])[0] || '?'}</span>
+                        <span class="analysis-event-type">${(output.event_type || 'other').replace('_', ' ')}</span>
+                        <span class="time-ago">${timeAgo(a.created_at)}</span>
+                    </div>
+                    <div class="analysis-summary">${escapeHtml(output.summary || '')}</div>
+                    <div class="analysis-metrics">
+                        <span class="metric">Impact: <span class="metric-value ${impactClass}">${(output.impact_score || 0) >= 0 ? '+' : ''}${(output.impact_score || 0).toFixed(2)}</span></span>
+                        <span class="metric">Severity: <span class="metric-value">${output.severity || '-'}</span></span>
+                        <span class="metric">Confidence: <span class="metric-value">${((output.confidence || 0) * 100).toFixed(0)}%</span></span>
+                    </div>
+                </div>`;
+        });
+
+        container.innerHTML = html;
+    }
+
+    // ── Helpers ──
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.appendChild(document.createTextNode(str));
+        return div.innerHTML;
+    }
+
+    function updateCounter(id, value) {
+        const el = $(id);
+        const old = parseInt(el.textContent, 10);
+        el.textContent = value;
+        if (value !== old) {
+            el.classList.add('bump');
+            setTimeout(() => el.classList.remove('bump'), 200);
+        }
+    }
+
+    // ── Toggle Signal Details ──
+    window.toggleDetails = function(idx) {
+        const el = document.getElementById('detail-' + idx);
+        if (el) el.classList.toggle('show');
+    };
+
+    // ── Data Fetching ──
+    async function fetchDashboardData() {
+        try {
+            const res = await fetch(API_BASE + '/api/dashboard-data');
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+
+            const data = await res.json();
+
+            // Update status
+            $('statusDot').classList.remove('disconnected');
+            $('statusText').textContent = 'Live';
+            $('lastUpdate').textContent = 'Updated ' + timeAgo(data.timestamp);
+
+            // Check if data changed
+            const newHash = JSON.stringify(data.signals?.length) + JSON.stringify(data.news?.length);
+            const changed = newHash !== lastDataHash;
+            lastDataHash = newHash;
+
+            // Render all panels
+            renderSignals(data.signals || []);
+            renderNews(data.news || []);
+            renderStates(data.states || {});
+            renderAnalyses(data.analyses || []);
+
+        } catch (err) {
+            console.error('Dashboard fetch error:', err);
+            $('statusDot').classList.add('disconnected');
+            $('statusText').textContent = 'Disconnected';
+            $('lastUpdate').textContent = 'Connection lost...';
+        }
+    }
+
+    // ── Initialize ──
+    fetchDashboardData();
+    setInterval(fetchDashboardData, POLL_INTERVAL);
+
+})();
+</script>
+
+</body>
+</html>
