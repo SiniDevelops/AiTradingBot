@@ -147,6 +147,28 @@ def init_db():
             ON trading_signals(ticker, created_at DESC)
         """)
 
+        # ========== Order Executions Table ==========
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS order_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER,
+                ticker TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                order_id TEXT,
+                status TEXT NOT NULL,
+                message TEXT,
+                trading_mode TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (signal_id) REFERENCES trading_signals(id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_order_executions_ticker
+            ON order_executions(ticker, created_at DESC)
+        """)
+
         conn.commit()
         print(f"Database initialized at {DB_PATH}")
 
@@ -421,4 +443,39 @@ def get_signals_by_ticker(ticker: str, limit: int = 20) -> List[Dict[str, Any]]:
             ORDER BY created_at DESC
             LIMIT ?
         """, (ticker, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+# ========== Order Execution Operations ==========
+def insert_order_execution(
+    signal_id: Optional[int],
+    ticker: str,
+    order_type: str,
+    quantity: int,
+    order_id: Optional[str],
+    status: str,
+    message: str,
+    trading_mode: str,
+) -> int:
+    """Insert an order execution record. Returns the execution ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO order_executions
+            (signal_id, ticker, order_type, quantity, order_id, status, message, trading_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (signal_id, ticker, order_type, quantity, order_id, status, message, trading_mode))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_recent_executions(limit: int = 50) -> List[Dict[str, Any]]:
+    """Get most recent order executions."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM order_executions
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,))
         return [dict(row) for row in cursor.fetchall()]

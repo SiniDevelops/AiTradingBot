@@ -71,14 +71,17 @@ class SignalEngine:
         analysis: LLMImpactAnalysis,
         news_id: str,
         audit_id: Optional[int] = None,
+        market_context=None,
     ) -> SignalResult:
         """
-        Generate a trading signal from an LLM impact analysis.
+        Generate a trading signal from an LLM impact analysis,
+        optionally enriched with real market data.
 
         Args:
             analysis: The structured analysis output from the LLM
             news_id: ID of the source news article
             audit_id: Optional audit trail ID
+            market_context: Optional MarketContext with price/RSI/SMA data
 
         Returns:
             SignalResult with signal type, strength, and reasoning
@@ -106,10 +109,16 @@ class SignalEngine:
         if event_bias != 0.0:
             reasons.append(
                 f"Event type '{analysis.event_type}' applied bias of {event_bias:+.2f} "
-                f"(raw={analysis.impact_score:.2f} → adjusted={adjusted_impact:.2f})"
+                f"(raw={analysis.impact_score:.2f} -> adjusted={adjusted_impact:.2f})"
             )
         else:
             reasons.append(f"Impact score: {analysis.impact_score:.2f} (no event-type bias)")
+
+        # ── Step 2b: Market Data Adjustments ───────────────────────
+        adjusted_impact, market_reasons = self._apply_market_adjustments(
+            adjusted_impact, analysis, market_context
+        )
+        reasons.extend(market_reasons)
 
         # ── Step 3: Signal Direction ───────────────────────────────
         signal, direction_reasons = self._determine_direction(adjusted_impact, analysis)
@@ -248,7 +257,7 @@ class SignalEngine:
         """Apply weakness adjustments for non-blocking risk flags (BUY/SELL only)."""
         reasons: List[str] = []
 
-        # Skip adjustments for HOLD signals — strength stays at 0.0
+        # Skip adjustments for HOLD signals -- strength stays at 0.0
         if signal == SignalType.HOLD:
             return strength, reasons
 
@@ -270,6 +279,121 @@ class SignalEngine:
             reasons.append(f"New information boost (+{boost:.2f})")
 
         return strength, reasons
+
+    def _apply_market_adjustments(
+        self,
+        adjusted_impact: float,
+        analysis: LLMImpactAnalysis,
+        market_context,
+    ) -> Tuple[float, List[str]]:
+        """
+        Adjust the impact score based on real market data.
+
+        Rules:
+        - RSI oversold (<30) + positive news -> boost BUY
+        - RSI overbought (>70) + negative news -> boost SELL
+        - RSI overbought (>70) + positive news -> weaken (already priced in)
+        - SMA bullish crossover -> small BUY bias
+        - SMA bearish crossover -> small SELL bias
+        - Near 52-week low + positive news -> boost BUY (reversal)
+        - Near 52-week high + negative news -> boost SELL (top)
+        - High volume -> amplify signal
+        """
+        reasons: List[str] = []
+
+        if market_context is None or not getattr(market_context, 'data_available', False):
+            reasons.append("No market data available -- signal based on news only")
+            return adjusted_impact, reasons
+
+        mc = market_context
+        original_impact = adjusted_impact
+
+        reasons.append(
+            f"Market: Rs.{mc.current_price:.2f} ({mc.day_change_pct:+.1f}%), "
+            f"RSI={mc.rsi_14:.0f}, SMA={mc.sma_signal}"
+        )
+
+        # ── RSI adjustments ──
+        if mc.rsi_14 < 30:
+            # Oversold
+            if adjusted_impact > 0:
+                boost = 0.15
+                adjusted_impact += boost
+                reasons.append(
+                    f"RSI oversold ({mc.rsi_14:.0f}<30) + positive news: "
+                    f"BUY boost +{boost:.2f}"
+                )
+            elif adjusted_impact < 0:
+                dampen = 0.10
+                adjusted_impact += dampen  # make less negative
+                reasons.append(
+                    f"RSI oversold ({mc.rsi_14:.0f}<30): "
+                    f"dampened SELL by +{dampen:.2f} (potential bounce)"
+                )
+        elif mc.rsi_14 > 70:
+            # Overbought
+            if adjusted_impact > 0:
+                penalty = 0.10
+                adjusted_impact -= penalty
+                reasons.append(
+                    f"RSI overbought ({mc.rsi_14:.0f}>70) + positive news: "
+                    f"weakened by -{penalty:.2f} (may be priced in)"
+                )
+            elif adjusted_impact < 0:
+                boost = 0.15
+                adjusted_impact -= boost  # make more negative
+                reasons.append(
+                    f"RSI overbought ({mc.rsi_14:.0f}>70) + negative news: "
+                    f"SELL boost -{boost:.2f}"
+                )
+
+        # ── SMA crossover adjustments ──
+        if mc.sma_signal == "bullish":
+            bias = 0.05
+            adjusted_impact += bias
+            reasons.append(f"SMA-9 > SMA-21 (bullish trend): bias +{bias:.2f}")
+        elif mc.sma_signal == "bearish":
+            bias = -0.05
+            adjusted_impact += bias
+            reasons.append(f"SMA-9 < SMA-21 (bearish trend): bias {bias:.2f}")
+
+        # ── 52-week proximity ──
+        if mc.near_52w_low and adjusted_impact > 0:
+            boost = 0.10
+            adjusted_impact += boost
+            reasons.append(
+                f"Near 52-week low (Rs.{mc.week_52_low:.0f}): "
+                f"reversal boost +{boost:.2f}"
+            )
+        elif mc.near_52w_high and adjusted_impact < 0:
+            boost = 0.10
+            adjusted_impact -= boost
+            reasons.append(
+                f"Near 52-week high (Rs.{mc.week_52_high:.0f}): "
+                f"top risk boost -{boost:.2f}"
+            )
+
+        # ── Volume amplification ──
+        if mc.volume_ratio > 2.0:
+            amplify = 0.05
+            if adjusted_impact > 0:
+                adjusted_impact += amplify
+            elif adjusted_impact < 0:
+                adjusted_impact -= amplify
+            reasons.append(
+                f"High volume ({mc.volume_ratio:.1f}x avg): "
+                f"signal amplified +/-{amplify:.2f}"
+            )
+
+        # Clamp to [-1.0, 1.0]
+        adjusted_impact = max(-1.0, min(1.0, adjusted_impact))
+
+        if adjusted_impact != original_impact:
+            reasons.append(
+                f"Market-adjusted impact: {original_impact:.2f} -> {adjusted_impact:.2f}"
+            )
+
+        return adjusted_impact, reasons
 
     def _build_result(
         self,
