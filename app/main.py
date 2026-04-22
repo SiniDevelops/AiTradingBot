@@ -5,11 +5,16 @@ signal generation, and dashboard.
 """
 import json
 import os
+import asyncio
 from datetime import datetime
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 import uvicorn
+
+# Load environment variables from .env
+from dotenv import load_dotenv
+load_dotenv()
 
 from app import db
 from app.models import (
@@ -26,6 +31,10 @@ from app.llm_analyzer import get_llm_provider, create_analysis_prompt
 from app.state_manager import StateManager
 from app.signal_engine import get_signal_engine
 from app.utils import extract_sentences
+from app.gnews_fetcher import get_gnews_fetcher, GNewsFetcher
+from app.zerodha_executor import get_zerodha_executor, init_zerodha
+from app.market_data import fetch_market_context
+from app.scheduler import start_scheduler
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -38,9 +47,21 @@ app = FastAPI(
 # ============ Lifecycle Events ============
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database and vector store on startup."""
+    """Initialize database, LLM, and broker connections on startup."""
     db.init_db()
     print("Database initialized")
+
+    # Initialize LLM provider (auto-selects Gemini if key is set)
+    get_llm_provider()
+
+    # Initialize Zerodha (authenticates if credentials are set)
+    try:
+        init_zerodha()
+    except Exception as e:
+        print(f"Zerodha init skipped: {e}")
+
+    # Start background scheduler (news every 5 min, market every 1 min)
+    asyncio.create_task(start_scheduler())
 
 
 # ============ Health Check ============
@@ -200,11 +221,13 @@ async def analyze_news(news_id: str):
                 llm_output_json=analysis.model_dump_json()
             )
             
-            # Step 2f: Generate trading signal
+            # Step 2f: Fetch market data & generate trading signal
+            market_ctx = fetch_market_context(ticker)
             signal_result = signal_engine.generate_signal(
                 analysis=analysis,
                 news_id=news_id,
                 audit_id=audit_id,
+                market_context=market_ctx,
             )
             
             # Persist signal to database
@@ -350,6 +373,151 @@ async def batch_analyze(news_list: List[NewsIngestRequest]):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ Pipeline Endpoint: GNews → Gemini → Zerodha ============
+@app.post("/fetch_and_analyze")
+async def fetch_and_analyze(
+    max_articles: int = 10,
+    queries: Optional[List[str]] = None,
+):
+    """
+    Full pipeline endpoint:
+    1. Fetch news from GNews API
+    2. Ingest each article
+    3. Analyze with Gemini LLM
+    4. Generate trading signals
+    5. Execute via Zerodha (or paper trade)
+    6. Return full results
+    """
+    try:
+        # Step 1: Fetch news from GNews
+        try:
+            fetcher = get_gnews_fetcher()
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"GNews not configured: {e}")
+
+        news_requests = fetcher.fetch_and_convert(
+            queries=queries,
+            max_per_query=max(1, max_articles // 5),
+        )
+
+        if not news_requests:
+            return {
+                "status": "no_news",
+                "message": "No news articles found from GNews",
+                "results": [],
+            }
+
+        pipeline_results = []
+        executor = get_zerodha_executor()
+
+        for news_req in news_requests[:max_articles]:
+            result_entry = {
+                "news_id": news_req.id,
+                "title": news_req.title,
+                "source": news_req.source,
+                "ingested": False,
+                "analyses": [],
+                "signals": [],
+                "executions": [],
+            }
+
+            # Step 2: Ingest
+            try:
+                ingest_response = await ingest_news(news_req)
+                result_entry["ingested"] = ingest_response.status == "ingested"
+                result_entry["tickers"] = ingest_response.tickers
+
+                if ingest_response.status != "ingested":
+                    result_entry["status"] = "duplicate"
+                    pipeline_results.append(result_entry)
+                    continue
+
+                # Step 3-4: Analyze (includes Gemini LLM + signal generation)
+                if ingest_response.tickers:
+                    analyses = await analyze_news(ingest_response.news_id)
+                    for analysis in analyses:
+                        result_entry["analyses"].append({
+                            "ticker": analysis.ticker,
+                            "event_type": analysis.analysis.event_type,
+                            "impact_score": analysis.analysis.impact_score,
+                            "confidence": analysis.analysis.confidence,
+                            "summary": analysis.analysis.summary,
+                        })
+
+                    # Step 5: Execute signals via Zerodha
+                    signals = db.get_signals_by_ticker(
+                        ingest_response.tickers[0], limit=len(ingest_response.tickers)
+                    )
+                    for signal_row in signals:
+                        signal_info = {
+                            "ticker": signal_row["ticker"],
+                            "signal": signal_row["signal"],
+                            "strength": signal_row["strength"],
+                        }
+                        result_entry["signals"].append(signal_info)
+
+                        # Build a minimal SignalResult for execution
+                        from app.models import SignalResult, SignalType
+                        signal_result = SignalResult(
+                            ticker=signal_row["ticker"],
+                            signal=SignalType(signal_row["signal"]),
+                            strength=signal_row["strength"],
+                            impact_score=signal_row["impact_score"],
+                            confidence=signal_row["confidence"],
+                            event_type=signal_row["event_type"],
+                            reasons=json.loads(signal_row["reasons_json"]),
+                            news_impact_summary=signal_row["news_impact_summary"],
+                            news_id=signal_row["news_id"],
+                            audit_id=signal_row.get("audit_id"),
+                            timestamp=datetime.now(),
+                        )
+
+                        exec_result = executor.execute_signal(signal_result)
+                        result_entry["executions"].append(exec_result)
+
+                        # Persist execution to DB
+                        db.insert_order_execution(
+                            signal_id=signal_row["id"],
+                            ticker=exec_result["ticker"],
+                            order_type=exec_result["action_taken"],
+                            quantity=exec_result["quantity"],
+                            order_id=exec_result.get("order_id"),
+                            status=exec_result["status"],
+                            message=exec_result["message"],
+                            trading_mode=executor.trading_mode,
+                        )
+
+                result_entry["status"] = "processed"
+
+            except Exception as e:
+                result_entry["status"] = f"error: {str(e)}"
+
+            pipeline_results.append(result_entry)
+
+        return {
+            "status": "ok",
+            "total_articles": len(news_requests),
+            "processed": len(pipeline_results),
+            "trading_mode": executor.trading_mode,
+            "zerodha_authenticated": executor.authenticated,
+            "results": pipeline_results,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ Order Execution Endpoints ============
+@app.get("/executions")
+async def get_executions(limit: int = 50):
+    """Get recent order executions."""
+    executions = db.get_recent_executions(limit)
+    return {"executions": executions, "count": len(executions)}
 
 
 # ============ Signal Endpoints ============

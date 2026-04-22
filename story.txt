@@ -1,0 +1,455 @@
+================================================================================
+                    AI TRADING BOT - HOW IT ALL WORKS
+                    A Story of News, AI, and Trading
+================================================================================
+
+Hey! Welcome to the AI Trading Bot. This file walks you through how every 
+piece of the system works, from the moment a news article is published to 
+the moment a trade is (or isn't) executed. Think of it as a behind-the-scenes 
+tour of the entire codebase.
+
+
+================================================================================
+CHAPTER 1: THE BIG PICTURE
+================================================================================
+
+Imagine you're a stock trader. Every morning, you:
+  1. Read the news about companies you care about
+  2. Think about whether the news is good or bad for the stock
+  3. Check the stock's price, trends, and momentum
+  4. Decide whether to BUY, SELL, or do nothing (HOLD)
+  5. Place the trade on your broker
+
+This bot does the exact same thing, but automatically:
+
+  GNews API       Google Gemini AI     Signal Engine      Zerodha
+  (read news)  -> (analyze sentiment) -> (decide action) -> (execute trade)
+       |               |                      |                  |
+  "Reliance      "This is positive,      "BUY signal,       "Paper: BUY  
+   beats Q4       impact +0.65,          strength 0.72,      1x RELIANCE"
+   estimates"     high confidence"        bullish SMA"
+
+
+================================================================================
+CHAPTER 2: FETCHING THE NEWS (app/gnews_fetcher.py)
+================================================================================
+
+Everything starts with news. The bot uses the GNews API to fetch real 
+financial headlines about Indian stocks.
+
+HOW IT WORKS:
+  1. On startup (or when you hit the /fetch_and_analyze endpoint), the bot
+     calls GNews with search queries like "Reliance Industries", "TCS", 
+     "Infosys", "HDFC Bank", etc.
+
+  2. GNews returns articles like:
+     {
+       "title": "Reliance Industries Q4 profit jumps 12%",
+       "description": "Reliance reported a net profit of...",
+       "source": {"name": "Economic Times"},
+       "publishedAt": "2026-04-20T09:30:00Z"
+     }
+
+  3. The bot converts each article into a NewsIngestRequest - a clean 
+     internal format with an ID, source, timestamp, title, and content.
+
+  4. Articles are deduplicated by URL - if we've already seen an article,
+     we skip it to avoid analyzing the same news twice.
+
+KEY FILE: app/gnews_fetcher.py
+  - GNewsFetcher class handles all API calls
+  - fetch_top_headlines() gets business news for India
+  - search_news() searches for specific company names
+  - fetch_and_convert() is the main entry point - fetches + converts
+  - Deduplicates by URL using UUID5 hashing
+
+
+================================================================================
+CHAPTER 3: FINDING THE STOCKS (app/ticker_linker.py)
+================================================================================
+
+Once we have a news article, we need to figure out WHICH stocks it's about.
+An article about "Mukesh Ambani's Reliance Industries" should map to the 
+ticker "RELIANCE" on NSE.
+
+HOW IT WORKS:
+  1. We maintain a big dictionary of aliases:
+     "Reliance" -> ["RELIANCE", "reliance", "reliance industries", "ril"]
+     "TCS"      -> ["TCS", "tcs", "tata consultancy"]
+     "HDFC Bank" -> ["HDFCBANK", "hdfc bank", "hdfc"]
+     ... and 30+ more Indian stocks
+
+  2. The ticker linker scans the article title + content for these aliases
+     using whole-word regex matching (so "ITC" matches but "SWITCH" doesn't).
+
+  3. It also looks for explicit ticker patterns like $RELIANCE, (INFY), etc.
+
+  4. The result: a list of tickers like ["RELIANCE", "INFY", "HCLTECH"]
+
+KEY FILE: app/ticker_linker.py
+  - TICKER_ALIASES dict maps company names to ticker symbols
+  - link_tickers(text, title) does the extraction
+  - Supports both US tickers (AAPL, MSFT) and Indian NSE tickers
+
+
+================================================================================
+CHAPTER 4: FETCHING STOCK PRICES (app/market_data.py)
+================================================================================
+
+Before making any trading decision, the bot checks the ACTUAL market data 
+for each stock. This is crucial - you don't want to buy a stock that's 
+already overbought just because the news is positive.
+
+HOW IT WORKS:
+  1. For each detected ticker (e.g., RELIANCE), we call yfinance to get 
+     3 months of daily price history.
+
+  2. From that data, we compute:
+     - Current Price: Rs.1365.00
+     - Day Change: +1.62%
+     - RSI (14-day): 50 (neutral - not overbought or oversold)
+     - SMA-9 vs SMA-21: bearish (short-term average below long-term)
+     - Volume Ratio: 1.2x average (normal volume)
+     - 52-Week High/Low: are we near the top or bottom?
+
+  3. All of this gets packaged into a MarketContext object that's passed 
+     to the signal engine later.
+
+WHAT THE INDICATORS MEAN:
+  - RSI < 30: Stock is OVERSOLD (potential bounce up)
+  - RSI > 70: Stock is OVERBOUGHT (potential drop)
+  - SMA-9 > SMA-21: BULLISH trend (price going up)
+  - SMA-9 < SMA-21: BEARISH trend (price going down)
+  - Volume > 2x average: HIGH ACTIVITY (signal is more significant)
+
+KEY FILE: app/market_data.py
+  - MarketContext class holds all computed data
+  - fetch_market_context(ticker) does everything
+  - compute_rsi() calculates the Relative Strength Index
+  - Handles weekends/holidays (NaN values) gracefully
+
+
+================================================================================
+CHAPTER 5: AI SENTIMENT ANALYSIS (app/llm_analyzer.py)
+================================================================================
+
+This is the brain of the system. We send each article + company context to 
+Google's Gemini AI and ask: "What's the impact of this news on the stock?"
+
+HOW IT WORKS:
+  1. We build a prompt with:
+     - The article text
+     - Retrieved context about the company (from the RAG vector store)
+     - The ticker symbol
+     - A system prompt telling Gemini to act as a financial analyst
+
+  2. Gemini responds with structured JSON:
+     {
+       "ticker": "RELIANCE",
+       "event_type": "earnings",
+       "impact_score": 0.65,        // -1.0 to +1.0
+       "confidence": 0.85,          // 0 to 1
+       "severity": "high",
+       "horizon": "swing",          // intraday, swing, or long
+       "is_new_information": true,
+       "risk_flags": [],
+       "contradiction_flags": [],
+       "summary": "Strong Q4 earnings beat estimates by 12%...",
+       "evidence": "net profit rose to Rs 19,000 crore..."
+     }
+
+  3. The impact_score is the key output:
+     +1.0 = extremely positive news
+      0.0 = neutral / no impact
+     -1.0 = extremely negative news
+
+  4. If Gemini is unavailable (rate limits, etc.), the bot falls back to a 
+     StubLLMProvider that gives reasonable defaults.
+
+KEY FILE: app/llm_analyzer.py
+  - GeminiProvider class wraps the google-genai SDK
+  - Uses response_mime_type="application/json" for structured output
+  - Auto-selects Gemini when GEMINI_API_KEY is set in .env
+  - Falls back to StubLLMProvider if Gemini fails
+
+
+================================================================================
+CHAPTER 6: THE RAG CONTEXT ENGINE (app/rag.py)
+================================================================================
+
+RAG = Retrieval-Augmented Generation. Before asking Gemini to analyze a 
+news article, we first retrieve relevant context about the company so 
+Gemini can make a more informed judgment.
+
+HOW IT WORKS:
+  1. Every time we analyze news for a stock, we store snippets in a 
+     vector store (FAISS):
+     - Company profiles ("Reliance is an Indian conglomerate...")
+     - Past events ("Reliance reported Q3 earnings on Jan 20...")
+     - Previous analysis summaries
+
+  2. When new news comes in, we search the vector store for similar 
+     content specific to that ticker.
+
+  3. The top matching chunks get sent to Gemini along with the new article,
+     giving it historical context.
+
+WHY THIS MATTERS:
+  - Without RAG: "Reliance profit rises" -> Gemini says positive
+  - With RAG: "Reliance profit rises" + context "Reliance already beat 
+    estimates last 3 quarters" -> Gemini can assess if this is new info 
+    or already expected
+
+KEY FILE: app/rag.py
+  - VectorStore class manages FAISS index
+  - add_chunk() stores a new piece of context
+  - retrieve_for_ticker() finds relevant past context
+
+
+================================================================================
+CHAPTER 7: STATE MANAGEMENT (app/state_manager.py)
+================================================================================
+
+The bot maintains a "state" for each company - a rolling picture of what's 
+happening with that stock. This prevents it from re-analyzing old news and 
+helps detect contradictions.
+
+HOW IT WORKS:
+  1. Each analysis creates a "state event" - e.g., "earnings_pending" for 
+     RELIANCE with start date, severity, and source.
+
+  2. Events can be "open" (active) or "closed" (resolved).
+
+  3. When new news comes in, the state manager checks:
+     - Does this conflict with existing state?
+     - Is this genuinely new information?
+     - Should we close any existing events?
+
+  4. State snapshots are saved to the database as JSON - you can query 
+     /state/RELIANCE to see the current state at any time.
+
+KEY FILE: app/state_manager.py
+  - StateManager.process_analysis() processes new analysis
+  - StateManager.commit_state_snapshot() saves current state
+  - Implements "Option B" - deterministic merge with LLM assistance
+
+
+================================================================================
+CHAPTER 8: THE SIGNAL ENGINE (app/signal_engine.py)
+================================================================================
+
+This is where the trading decision gets made. The signal engine takes 
+Gemini's analysis + market data and produces a BUY, SELL, or HOLD signal.
+
+THE DECISION FLOW:
+
+  Step 1: QUALITY GATES
+    "Is this analysis trustworthy?"
+    - If confidence < 0.6 -> HOLD (we're not sure enough)
+    - If risk_flags include "rumor" or "low_quality_source" -> HOLD
+    - If contradiction_flags are set -> HOLD
+
+  Step 2: IMPACT SCORE + EVENT BIAS
+    "How impactful is this news?"
+    - Start with Gemini's impact score (e.g., +0.65)
+    - Add event-type bias (earnings events get a +0.05 boost, etc.)
+    - Result: adjusted_impact = +0.70
+
+  Step 2b: MARKET DATA ADJUSTMENTS (NEW!)
+    "What does the market say?"
+    - RSI oversold (<30) + positive news -> boost BUY signal (+0.15)
+    - RSI overbought (>70) + positive news -> weaken signal (-0.10)
+    - SMA bullish crossover -> add +0.05 bias
+    - SMA bearish crossover -> add -0.05 bias
+    - Near 52-week low + positive news -> reversal boost (+0.10)
+    - Near 52-week high + negative news -> top risk boost (-0.10)
+    - High volume (>2x avg) -> amplify signal
+
+  Step 3: DIRECTION
+    - adjusted_impact > +0.3 -> BUY
+    - adjusted_impact < -0.3 -> SELL
+    - otherwise -> HOLD
+
+  Step 4: STRENGTH (0 to 1)
+    - Based on |impact|, confidence, and severity
+    - Strong signals (|impact|>0.6) get higher strength
+
+  Step 5: WEAKNESS ADJUSTMENTS
+    - "already_priced_in" flag reduces strength
+    - "is_new_information" flag boosts strength slightly
+
+EVERY SIGNAL COMES WITH REASONS:
+  [
+    "Event type 'earnings' applied bias of +0.05 (raw=0.65 -> adjusted=0.70)",
+    "Market: Rs.1365.00 (+1.6%), RSI=50, SMA=bearish",
+    "SMA-9 < SMA-21 (bearish trend): bias -0.05",
+    "Market-adjusted impact: 0.70 -> 0.65",
+    "BUY: adjusted impact 0.65 > threshold 0.30",
+    "New information boost (+0.05)"
+  ]
+
+KEY FILE: app/signal_engine.py
+  - SignalEngine.generate_signal() is the main method
+  - SignalThresholds class has all configurable parameters
+  - Every decision is logged with explicit reasoning
+  - No black boxes - you can trace exactly why any signal was generated
+
+
+================================================================================
+CHAPTER 9: EXECUTING TRADES (app/zerodha_executor.py)
+================================================================================
+
+Once we have a BUY or SELL signal, the bot attempts to execute it through 
+Zerodha's Kite Connect API.
+
+THE THREE MODES:
+
+  1. PAPER MODE (default, TRADING_MODE=paper):
+     - No real orders placed
+     - Signals are logged to console and database
+     - Perfect for testing and monitoring
+
+  2. LIVE MODE (TRADING_MODE=live + authenticated):
+     - Real orders placed on NSE via Kite Connect
+     - Uses MARKET orders for immediate execution
+     - MIS (intraday) product type
+     - Requires valid access_token from browser login flow
+
+  3. LOG-ONLY MODE (auth failed):
+     - When Kite authentication fails (expired token, wrong keys)
+     - Bot continues running but only logs what it WOULD do
+     - Graceful degradation - never crashes
+
+ZERODHA AUTH FLOW:
+  1. You set KITE_API_KEY and KITE_API_SECRET in .env
+  2. You log in via browser to get a request_token
+  3. Bot exchanges request_token for access_token on startup
+  4. access_token is valid for 24 hours
+  5. If this fails, bot runs in log-only mode
+
+KEY FILE: app/zerodha_executor.py
+  - ZerodhaExecutor.authenticate() handles the auth flow
+  - ZerodhaExecutor.execute_signal() places orders
+  - HOLD signals are always skipped (no order needed)
+  - All executions are saved to the order_executions database table
+
+
+================================================================================
+CHAPTER 10: THE DATABASE (app/db.py)
+================================================================================
+
+Everything is stored in SQLite at data/trading_bot.db. Here's what's inside:
+
+  news_raw          - Raw articles as they come in from GNews
+  news_clean        - Deduplicated articles with extracted tickers
+  ticker_profile    - Long-term company profiles for RAG context
+  state_events      - Event history (earnings, lawsuits, product launches)
+  state_snapshot    - Current state snapshot for each company (JSON)
+  vector_chunks     - Metadata for vector store embeddings
+  analysis_runs     - Full audit trail (input article, retrieved context, 
+                      LLM output, generated signal)
+  trading_signals   - All BUY/SELL/HOLD signals with reasoning
+  order_executions  - All trade executions (paper and live)
+
+KEY FILE: app/db.py
+  - init_db() creates all tables on startup
+  - Uses SQLite with row_factory for dict results
+  - Foreign keys link signals to news and audit records
+
+
+================================================================================
+CHAPTER 11: THE DASHBOARD (app/main.py + templates/dashboard.html)
+================================================================================
+
+The web dashboard at http://localhost:8000/dashboard shows everything 
+in real time:
+
+  TOP BAR: BUY count | SELL count | HOLD count | Uptime timer
+
+  SIGNAL ENGINE EXECUTIONS:
+    Time | Ticker | Signal | Strength | Event | Impact | Confidence
+    18:46 | RELIANCE | BUY   | 17%     | reg   | +0.30  | 65%
+    18:46 | SBIN     | HOLD  | 0%      | other | +0.00  | 100%
+
+  NEWS FEED:
+    Latest articles with source and relative time
+
+  TICKER STATES:
+    RELIANCE: 1 open event | No active risks
+    INFY: 1 open event | No active risks
+
+The dashboard auto-refreshes every 10 seconds via the /api/dashboard-data 
+endpoint that returns all data as JSON.
+
+
+================================================================================
+CHAPTER 12: HOW TO RUN IT
+================================================================================
+
+QUICK TEST (runs once, prints to console):
+  .\venv\Scripts\python run_pipeline.py --max-articles 5
+
+SEARCH SPECIFIC STOCKS:
+  .\venv\Scripts\python run_pipeline.py --query "Infosys earnings" --max-articles 3
+
+START THE WEB SERVER + DASHBOARD:
+  .\venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+  Then open: http://127.0.0.1:8000/dashboard
+
+TRIGGER PIPELINE VIA API:
+  curl -X POST "http://127.0.0.1:8000/fetch_and_analyze?max_articles=5"
+
+VIEW RESULTS:
+  http://127.0.0.1:8000/executions    - Order execution history
+  http://127.0.0.1:8000/signals       - All trading signals
+  http://127.0.0.1:8000/state/RELIANCE - Reliance's current state
+  http://127.0.0.1:8000/docs          - Interactive API documentation
+
+
+================================================================================
+CHAPTER 13: THE FILES AT A GLANCE
+================================================================================
+
+  app/gnews_fetcher.py    - Fetches news from GNews API
+  app/ticker_linker.py    - Maps company names to stock tickers
+  app/market_data.py      - Fetches live prices, RSI, SMA from yfinance
+  app/llm_analyzer.py     - Sends articles to Gemini AI for analysis
+  app/rag.py              - FAISS vector store for context retrieval
+  app/state_manager.py    - Tracks company state and event history
+  app/signal_engine.py    - Converts analysis + market data into signals
+  app/zerodha_executor.py - Executes trades via Zerodha Kite Connect
+  app/db.py               - SQLite database operations
+  app/ingest.py           - News ingestion and deduplication
+  app/models.py           - All Pydantic data models
+  app/main.py             - FastAPI app with all endpoints
+  app/utils.py            - Utility functions (sentence extraction, etc.)
+  run_pipeline.py         - Standalone CLI script for testing
+  .env                    - API keys (never committed to git)
+
+
+================================================================================
+CHAPTER 14: WHAT MAKES THIS DIFFERENT
+================================================================================
+
+Most trading bots use ONLY technical indicators (RSI, MACD, etc.) or ONLY 
+news sentiment. This bot combines BOTH:
+
+  Traditional Bot:          This Bot:
+  ----------------          ---------
+  Price data only           News + Price data
+  Black-box ML model        Transparent rules with reasons
+  No explanation            Every signal has explicit reasoning
+  Hard to debug             Full audit trail with citations
+
+The signal engine is completely transparent:
+  - No neural networks making opaque decisions
+  - Every BUY/SELL/HOLD comes with a list of reasons
+  - You can trace from signal -> analysis -> news article -> raw data
+  - The /audit/{id} endpoint shows the complete chain
+
+
+================================================================================
+                              END OF STORY
+          "The best traders don't predict the future.
+           They understand the present better than everyone else."
+================================================================================

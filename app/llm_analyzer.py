@@ -128,20 +128,91 @@ IMPORTANT RULES:
 
 
 class GeminiProvider(LLMProvider):
-    """Google Gemini-based LLM provider."""
-    
+    """Google Gemini-based LLM provider using google-genai SDK."""
+
+    SYSTEM_PROMPT = """You are a financial analyst specialized in extracting and analyzing news impact on stocks.
+You will be given:
+1) A news article excerpt
+2) Retrieved context about the company (profile, recent events)
+3) A ticker symbol
+
+Your task is to produce a structured JSON analysis with these fields:
+- ticker: string (the stock ticker being analyzed)
+- event_type: one of [lawsuit, earnings, guidance, product_launch, regulatory, macro, other]
+- is_new_information: boolean (true if this is genuinely new, not already known)
+- impact_score: float between -1.0 (very negative) and 1.0 (very positive)
+- horizon: one of [intraday, swing, long]
+- severity: one of [low, med, high]
+- confidence: float between 0 and 1 (your confidence in this analysis)
+- risk_flags: list of any applicable flags: [rumor, low_quality_source, ambiguous, already_priced_in] (empty list if none)
+- contradiction_flags: list of any applicable flags: [conflicts_with_guidance, conflicts_with_state, none]
+- summary: 1-2 sentence summary of the impact
+- evidence: 1 short excerpt from the article supporting the analysis
+- citations: list of {layer, source_id, why} referencing provided context (can be empty)
+
+IMPORTANT RULES:
+1) Be precise with impact_score — use the full range from -1.0 to 1.0
+2) If uncertain, set low confidence and is_new_information=false
+3) If the news contradicts recent guidance or state, mark in contradiction_flags
+4) Do NOT recommend trading actions; only analyze the impact
+5) For Indian market stocks, use NSE ticker symbols
+"""
+
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError("Google API key required")
-    
-    def analyze(self, 
+            raise ValueError("Gemini API key required. Set GEMINI_API_KEY in .env")
+
+        from google import genai
+        self.client = genai.Client(api_key=self.api_key)
+        self.model = "gemini-2.5-flash"
+        print(f"[Gemini] Initialized with model: {self.model}")
+
+    def analyze(self,
                 ticker: str,
                 article_excerpt: str,
                 title: str,
                 retrieved_context: List[RetrievedChunk]) -> LLMImpactAnalysis:
-        """Call Gemini API to analyze article."""
-        raise NotImplementedError("Gemini integration not yet implemented for MVP. Use StubLLMProvider.")
+        """Call Gemini API to analyze article and return structured impact analysis."""
+
+        # Build the user prompt
+        user_prompt = create_analysis_prompt(
+            ticker=ticker,
+            title=title,
+            article_excerpt=article_excerpt,
+            retrieved_context=retrieved_context,
+        )
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=f"{self.SYSTEM_PROMPT}\n\n{user_prompt}",
+                config={
+                    "response_mime_type": "application/json",
+                },
+            )
+
+            # Parse JSON response manually
+            analysis = parse_llm_response(response.text)
+            if analysis:
+                print(f"[Gemini] Analysis for {ticker}: "
+                      f"impact={analysis.impact_score:+.2f}, "
+                      f"event={analysis.event_type}, "
+                      f"confidence={analysis.confidence:.2f}")
+                return analysis
+            else:
+                print(f"[Gemini] Failed to parse response for {ticker}, "
+                      f"falling back to stub")
+                return StubLLMProvider().analyze(
+                    ticker, article_excerpt, title, retrieved_context
+                )
+
+        except Exception as e:
+            print(f"[Gemini] API call failed for {ticker}: {e}")
+            print(f"[Gemini] Falling back to stub analysis")
+            return StubLLMProvider().analyze(
+                ticker, article_excerpt, title, retrieved_context
+            )
 
 
 class GrokProvider(LLMProvider):
@@ -166,10 +237,25 @@ _llm_provider: Optional[LLMProvider] = None
 
 
 def get_llm_provider() -> LLMProvider:
-    """Get or create the global LLM provider."""
+    """Get or create the global LLM provider.
+    
+    Auto-selects GeminiProvider if GEMINI_API_KEY is set,
+    otherwise falls back to StubLLMProvider.
+    """
     global _llm_provider
     if _llm_provider is None:
-        _llm_provider = StubLLMProvider()
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        if gemini_key and gemini_key != "your_gemini_api_key_here":
+            try:
+                _llm_provider = GeminiProvider(api_key=gemini_key)
+                print("[LLM] Using GeminiProvider for analysis")
+            except Exception as e:
+                print(f"[LLM] Failed to init GeminiProvider: {e}")
+                print("[LLM] Falling back to StubLLMProvider")
+                _llm_provider = StubLLMProvider()
+        else:
+            print("[LLM] No Gemini API key found, using StubLLMProvider")
+            _llm_provider = StubLLMProvider()
     return _llm_provider
 
 
